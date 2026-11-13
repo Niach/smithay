@@ -99,6 +99,10 @@ where
         drop(inner);
         state.output_bound(global_data.output.clone(), output);
     }
+
+    fn can_view(client: Client, global_data: &WlOutputData) -> bool {
+        (global_data.filter)(&client)
+    }
 }
 
 impl<D> Dispatch<WlOutput, OutputUserData, D> for OutputManagerState
