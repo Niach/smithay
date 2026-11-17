@@ -180,9 +180,9 @@ impl XWmDnd {
 
         trace!("New XDND selection from {}", event.owner);
         // figure out, if we have a grab
-        let ptr_grab = data
-            .seat_state()
-            .seats
+        let seats = data.seat_state().seats.clone();
+        let seats: Vec<_> = seats.into_iter().filter(|seat| data.dnd_seat(id, seat)).collect();
+        let ptr_grab = seats
             .iter()
             .flat_map(|seat| {
                 seat.get_pointer().and_then(|ptr| {
@@ -192,9 +192,7 @@ impl XWmDnd {
             })
             .max_by(|(_, s1, _), (_, s2, _)| s1.partial_cmp(s2).unwrap_or(cmp::Ordering::Equal));
 
-        let touch_grab = data
-            .seat_state()
-            .seats
+        let touch_grab = seats
             .iter()
             .flat_map(|seat| {
                 seat.get_touch().and_then(|touch| {

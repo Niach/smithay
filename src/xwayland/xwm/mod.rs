@@ -135,7 +135,7 @@
 
 use crate::{
     input::{
-        SeatHandler,
+        Seat, SeatHandler,
         dnd::{DndFocus, DndGrabHandler},
     },
     output::Output,
@@ -584,6 +584,20 @@ pub trait XwmHandler {
 
     /// WM has lost connection to X server
     fn disconnected(&mut self, _xwm: XwmId) {}
+
+    /// Whether a drag started by an X11 client of this WM may take over the grab of `seat`.
+    ///
+    /// When an X11 client starts a drag, the grab it belongs to is looked up among the
+    /// seats holding a pointer or touch grab. A compositor with several seats can limit
+    /// that lookup to the seats this XWayland instance takes its input from. The default
+    /// accepts every seat.
+    fn dnd_seat(&mut self, xwm: XwmId, seat: &Seat<Self>) -> bool
+    where
+        Self: SeatHandler + Sized,
+    {
+        let _ = (xwm, seat);
+        true
+    }
 }
 
 /// The runtime state of an reparenting XWayland window manager.
