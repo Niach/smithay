@@ -369,6 +369,37 @@ impl<D: SeatHandler> SeatState<D> {
 
         Seat { arc }
     }
+
+    /// Remove a seat from this state
+    ///
+    /// Keyboard, pointer and touch handles look their seat up in this state and
+    /// panic when it is missing, so a seat is only removed once nothing else can
+    /// reach it: no clone of the [`Seat`] besides the one passed in and the one
+    /// stored here, and no clone of its keyboard, pointer or touch handle outside
+    /// the seat itself. Remove the seat's global and drop your own handles first.
+    ///
+    /// Returns `true` when the seat is no longer part of this state and `false`
+    /// when it is still shared; in that case nothing changed and the call can be
+    /// repeated later.
+    pub fn remove_seat(&mut self, seat: &Seat<D>) -> bool {
+        let Some(index) = self.seats.iter().position(|s| s == seat) else {
+            return true;
+        };
+        if Arc::strong_count(&seat.arc) > 2 {
+            return false;
+        }
+        {
+            let inner = seat.arc.inner.lock().unwrap();
+            let shared = inner.keyboard.as_ref().is_some_and(|h| Arc::strong_count(&h.arc) > 1)
+                || inner.pointer.as_ref().is_some_and(|h| Arc::strong_count(&h.arc) > 1)
+                || inner.touch.as_ref().is_some_and(|h| Arc::strong_count(&h.arc) > 1);
+            if shared {
+                return false;
+            }
+        }
+        self.seats.remove(index);
+        true
+    }
 }
 
 impl<D: SeatHandler + 'static> Seat<D> {
