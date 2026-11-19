@@ -145,13 +145,14 @@ use crate::{
         xwayland_shell::{self, XWaylandShellHandler},
     },
 };
-use calloop::{Interest, LoopHandle, Mode, PostAction, generic::Generic, ping};
+use calloop::{Interest, LoopHandle, Mode, PostAction, RegistrationToken, generic::Generic, ping};
 use portable_atomic::AtomicF64;
 use rustix::fs::OFlags;
 use std::{
     cell::RefCell,
     cmp::Reverse,
     collections::{BinaryHeap, HashMap},
+    fmt,
     ops::Deref,
     os::unix::{
         io::{AsFd, OwnedFd},
@@ -633,12 +634,38 @@ pub struct X11Wm {
 
     pub(super) focus_release: FocusReleaseHandle,
 
+    /// Removes an event source from the loop the window manager runs in:
+    /// a selection transfer's, whose callback asks the handler for this
+    /// window manager by its id.
+    remove_source: SourceRemover,
+
     span: tracing::Span,
+}
+
+/// [`X11Wm::remove_source`]: the loop handle's `remove`, for whatever the
+/// handler's state type is.
+struct SourceRemover(Box<dyn Fn(RegistrationToken)>);
+
+impl fmt::Debug for SourceRemover {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SourceRemover")
+    }
 }
 
 impl Drop for X11Wm {
     fn drop(&mut self) {
         xwm_id::remove(self.id.0);
+
+        // A transfer's source outlives nothing of this window manager: its
+        // callback would ask the handler for an X11Wm that is gone.
+        for selection in [&mut self.clipboard, &mut self.primary, &mut self.dnd.selection] {
+            let tokens = selection.incoming.values_mut().filter_map(|transfer| transfer.token.take()).chain(selection.outgoing.values_mut().filter_map(|transfer| transfer.token.take()));
+            for token in tokens.collect::<Vec<_>>() {
+                (self.remove_source.0)(token);
+            }
+            selection.incoming.clear();
+            selection.outgoing.clear();
+        }
 
         // Break reference cycle caused by deferred_sync hook
         for window in std::mem::take(&mut self.windows) {
@@ -1059,6 +1086,10 @@ impl X11Wm {
             client_list_stacking: Vec::new(),
             is_showing_desktop: false,
             focus_release,
+            remove_source: SourceRemover(Box::new({
+                let handle = handle.clone();
+                move |token| handle.remove(token)
+            })),
             span,
         };
 
