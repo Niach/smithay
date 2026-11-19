@@ -152,7 +152,9 @@ const VERSION: u32 = 1;
 #[derive(Debug, Clone)]
 pub struct XWaylandShellState {
     global: GlobalId,
-    by_serial: HashMap<u64, WlSurface>,
+    /// Keyed by the X11 window manager too: each XWayland counts its
+    /// serials from 1, so with two servers one serial names two surfaces.
+    by_serial: HashMap<(XwmId, u64), WlSurface>,
 }
 
 impl XWaylandShellState {
@@ -177,9 +179,10 @@ impl XWaylandShellState {
         self.global.clone()
     }
 
-    /// Retrieves the surface for a given serial.
-    pub fn surface_for_serial(&self, serial: u64) -> Option<WlSurface> {
-        self.by_serial.get(&serial).cloned()
+    /// Retrieves the surface for a given serial of the XWayland that `xwm`
+    /// manages.
+    pub fn surface_for_serial(&self, xwm: XwmId, serial: u64) -> Option<WlSurface> {
+        self.by_serial.get(&(xwm, serial)).cloned()
     }
 }
 
@@ -361,14 +364,15 @@ fn serial_commit_hook<D: XWaylandShellHandler + XwmHandler + SeatHandler + 'stat
                     }
                 } else {
                     // this is necessary for the atom-handler to look up the matching surface
+                    let key = (*xwm_id, serial);
                     XWaylandShellHandler::xwayland_shell_state(state)
                         .by_serial
-                        .insert(serial, surface.clone());
+                        .insert(key, surface.clone());
 
                     compositor::add_destruction_hook::<D, _>(surface, move |state, _| {
                         XWaylandShellHandler::xwayland_shell_state(state)
                             .by_serial
-                            .remove(&serial);
+                            .remove(&key);
                     });
                 }
             }

@@ -2494,7 +2494,7 @@ where
 
                         if let Some(wl_surface) =
                             xwayland_shell::XWaylandShellHandler::xwayland_shell_state(state)
-                                .surface_for_serial(serial)
+                                .surface_for_serial(xwm_id, serial)
                                 .clone()
                         {
                             debug!(
