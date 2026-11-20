@@ -633,6 +633,8 @@ pub struct X11Wm {
     is_showing_desktop: bool,
 
     pub(super) focus_release: FocusReleaseHandle,
+    /// The focus release's source in the loop.
+    focus_release_token: Option<RegistrationToken>,
 
     /// Removes an event source from the loop the window manager runs in:
     /// a selection transfer's, whose callback asks the handler for this
@@ -665,6 +667,11 @@ impl Drop for X11Wm {
             }
             selection.incoming.clear();
             selection.outgoing.clear();
+        }
+        // The focus release's source holds a ping to itself and would stay
+        // in the loop for good, one eventfd per window manager ever started.
+        if let Some(token) = self.focus_release_token.take() {
+            (self.remove_source.0)(token);
         }
 
         // Break reference cycle caused by deferred_sync hook
@@ -1058,10 +1065,12 @@ impl X11Wm {
         let wm_window = OwnedX11Window::new(win, &conn);
 
         let (focus_release, focus_release_source) = FocusReleaseHandle::new(&conn)?;
-        {
+        // Its callback holds a ping of its own: the source never closes by
+        // itself, so the window manager's Drop removes it.
+        let focus_release_token = {
             let release = focus_release.clone();
-            handle.insert_source(focus_release_source, move |_, _, _| release.dispatch())?;
-        }
+            handle.insert_source(focus_release_source, move |_, _, _| release.dispatch())?
+        };
 
         drop(_guard);
         let wm = Self {
@@ -1086,6 +1095,7 @@ impl X11Wm {
             client_list_stacking: Vec::new(),
             is_showing_desktop: false,
             focus_release,
+            focus_release_token: Some(focus_release_token),
             remove_source: SourceRemover(Box::new({
                 let handle = handle.clone();
                 move |token| handle.remove(token)
