@@ -46,6 +46,7 @@ use tracing::warn;
 use wayland_server::protocol::wl_surface::WlSurface;
 use xkbcommon::xkb::Keycode;
 
+use super::XwmConnection;
 use x11rb::{
     connection::Connection as _,
     errors::{ReplyError, ReplyOrIdError},
@@ -58,7 +59,7 @@ use x11rb::{
             InputFocus, PropMode, Window as X11Window,
         },
     },
-    rust_connection::{ConnectionError, RustConnection},
+    rust_connection::ConnectionError,
     wrapper::ConnectionExt,
     x11_utils::X11Error,
 };
@@ -72,7 +73,7 @@ pub struct X11Surface {
     client_scale: Option<Arc<AtomicF64>>,
     window: X11Window,
     focus_release: Option<super::FocusReleaseHandle>,
-    pub(super) conn: Weak<RustConnection>,
+    pub(super) conn: Weak<XwmConnection>,
     pub(super) atoms: super::Atoms,
     servertime_counter: Option<Counter>,
     pub(crate) state: Arc<Mutex<SharedSurfaceState>>,
@@ -330,7 +331,7 @@ impl X11Surface {
         xwm: Option<&X11Wm>,
         window: u32,
         override_redirect: bool,
-        conn: Weak<RustConnection>,
+        conn: Weak<XwmConnection>,
         atoms: super::Atoms,
         servertime_counter: Option<Counter>,
         geometry: Rectangle<i32, Logical>,
@@ -2497,7 +2498,7 @@ impl WaylandFocus for X11Surface {
 }
 
 fn fetch_opaque_regions(
-    conn: &Arc<RustConnection>,
+    conn: &Arc<XwmConnection>,
     window: X11Window,
     property_atom: Atom,
     client_scale: Option<&Arc<AtomicF64>>,

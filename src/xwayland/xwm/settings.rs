@@ -5,11 +5,11 @@
 use std::{borrow::Borrow, collections::HashMap, hash::Hash, sync::Arc};
 
 use tracing::debug;
+use super::XwmConnection;
 use x11rb::{
     connection::Connection,
     errors::{ConnectionError, ReplyOrIdError},
     protocol::xproto::{ConnectionExt as _, PropMode, Window, WindowClass},
-    rust_connection::RustConnection,
     wrapper::ConnectionExt as _,
 };
 
@@ -82,7 +82,7 @@ pub enum NameError {
 
 impl XSettings {
     pub(super) fn new(
-        conn: &Arc<RustConnection>,
+        conn: &Arc<XwmConnection>,
         depth: u8,
         root: Window,
         atoms: &super::Atoms,
@@ -202,7 +202,7 @@ impl XSettings {
         data
     }
 
-    pub(super) fn update(&mut self, conn: &RustConnection) -> Result<(), ConnectionError> {
+    pub(super) fn update(&mut self, conn: &XwmConnection) -> Result<(), ConnectionError> {
         conn.change_property8(
             PropMode::REPLACE,
             *self.window,

@@ -186,12 +186,14 @@ use x11rb::{
             StackMode, Visualid, WindowClass,
         },
     },
-    rust_connection::{ConnectionError, DefaultStream, RustConnection},
+    rust_connection::ConnectionError,
     wrapper::ConnectionExt as _,
 };
 
 mod dnd;
 mod mwm;
+mod round_trips;
+pub use self::round_trips::XwmConnection;
 pub use self::mwm::*;
 pub mod settings;
 use settings::{NameError, Value, XSettings};
@@ -605,7 +607,7 @@ pub trait XwmHandler {
 #[derive(Debug)]
 pub struct X11Wm {
     id: XwmId,
-    conn: Arc<RustConnection>,
+    conn: Arc<XwmConnection>,
     client_scale: Arc<AtomicF64>,
     screen: Screen,
     wm_window: OwnedX11Window,
@@ -685,11 +687,11 @@ impl Drop for X11Wm {
 pub(super) struct FocusReleaseHandle {
     pending: Arc<AtomicBool>,
     signal: ping::Ping,
-    conn: Weak<RustConnection>,
+    conn: Weak<XwmConnection>,
 }
 
 impl FocusReleaseHandle {
-    fn new(conn: &Arc<RustConnection>) -> std::io::Result<(Self, ping::PingSource)> {
+    fn new(conn: &Arc<XwmConnection>) -> std::io::Result<(Self, ping::PingSource)> {
         let (signal, source) = ping::make_ping()?;
         Ok((
             Self {
@@ -795,12 +797,12 @@ impl From<ConnectionError> for PrimaryOutputError {
 
 #[derive(Debug, Clone)]
 struct OwnedX11Window {
-    conn: Weak<RustConnection>,
+    conn: Weak<XwmConnection>,
     window: Arc<X11Window>,
 }
 
 impl OwnedX11Window {
-    fn new(window: X11Window, conn: &Arc<RustConnection>) -> Self {
+    fn new(window: X11Window, conn: &Arc<XwmConnection>) -> Self {
         OwnedX11Window {
             conn: Arc::downgrade(conn),
             window: Arc::new(window),
@@ -864,14 +866,58 @@ impl X11Wm {
         <D as SeatHandler>::TouchFocus: DndFocus<D>,
         D: 'static,
     {
+        Self::start_wm_inner(handle, dh, connection, client, None)
+    }
+
+    /// [`start_wm`](Self::start_wm), with a time limit on every call to
+    /// the X server that waits for it (a reply, a flush, a send the server
+    /// does not read): a call that has not returned after `limit` shuts the
+    /// connection down, the call fails, and the handler hears
+    /// [`XwmHandler::disconnected`] for this window manager. For an X
+    /// server whose clients the compositor does not trust to keep it
+    /// responsive: the compositor's thread waits for it `limit` at most,
+    /// once.
+    pub fn start_wm_with_round_trip_limit<D>(
+        handle: LoopHandle<'static, D>,
+        dh: &DisplayHandle,
+        connection: UnixStream,
+        client: wayland_server::Client,
+        limit: std::time::Duration,
+    ) -> Result<Self, Box<dyn std::error::Error>>
+    where
+        D: XwmHandler,
+        D: xwayland_shell::XWaylandShellHandler,
+        D: SeatHandler,
+        D: DndGrabHandler,
+        <D as SeatHandler>::PointerFocus: DndFocus<D>,
+        <D as SeatHandler>::TouchFocus: DndFocus<D>,
+        D: 'static,
+    {
+        Self::start_wm_inner(handle, dh, connection, client, Some(limit))
+    }
+
+    fn start_wm_inner<D>(
+        handle: LoopHandle<'static, D>,
+        dh: &DisplayHandle,
+        connection: UnixStream,
+        client: wayland_server::Client,
+        round_trip_limit: Option<std::time::Duration>,
+    ) -> Result<Self, Box<dyn std::error::Error>>
+    where
+        D: XwmHandler,
+        D: xwayland_shell::XWaylandShellHandler,
+        D: SeatHandler,
+        D: DndGrabHandler,
+        <D as SeatHandler>::PointerFocus: DndFocus<D>,
+        <D as SeatHandler>::TouchFocus: DndFocus<D>,
+        D: 'static,
+    {
         let id = XwmId(xwm_id::next());
         let span = debug_span!("xwayland_wm", id = id.0);
         let _guard = span.enter();
 
         // Create an X11 connection. XWayland only uses screen 0.
-        let screen = 0;
-        let stream = DefaultStream::from_unix_stream(connection)?.0;
-        let conn = RustConnection::connect_to_stream(stream, screen)?;
+        let conn = XwmConnection::connect(connection, round_trip_limit)?;
         let atoms = Atoms::new(&conn)?.reply()?;
         let screen = conn.setup().roots[0].clone();
         let randr_primary = conn.randr_get_output_primary(screen.root)?.reply()?.output;
@@ -1123,6 +1169,13 @@ impl X11Wm {
     /// Id of this X11 WM
     pub fn id(&self) -> XwmId {
         self.id
+    }
+
+    /// A call to the X server outlasted the limit of
+    /// [`start_wm_with_round_trip_limit`](Self::start_wm_with_round_trip_limit)
+    /// and the connection was shut down.
+    pub fn timed_out(&self) -> bool {
+        self.conn.timed_out()
     }
 
     /// Whether or not the XSYNC extension is present
@@ -2886,7 +2939,7 @@ where
 }
 
 fn send_configure_notify(
-    conn: &RustConnection,
+    conn: &XwmConnection,
     win: &X11Window,
     geometry: Rectangle<i32, Client>,
     override_redirect: bool,

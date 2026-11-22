@@ -483,6 +483,16 @@ impl XWaylandClientData {
     pub fn user_data(&self) -> &UserDataMap {
         &self.data_map
     }
+
+    /// The process id of the Xwayland server, while its client is
+    /// connected (`None` once it disconnected).
+    ///
+    /// The display's lock file holds the compositor's pid, not the
+    /// server's: this is the one way to find the server's process, e.g. to
+    /// move it into a cgroup of its own.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.lock().unwrap().as_ref().map(|child| child.id())
+    }
 }
 
 /// Removes the `O_CLOEXEC` flag from a `RawFd`, causing it to leak when we

@@ -7,6 +7,7 @@ use std::{
 
 use calloop::{LoopHandle, RegistrationToken};
 use tracing::{debug, trace, warn};
+use super::XwmConnection;
 use x11rb::{
     connection::Connection as _,
     errors::ReplyOrIdError,
@@ -18,7 +19,6 @@ use x11rb::{
             WindowClass,
         },
     },
-    rust_connection::RustConnection,
     wrapper::ConnectionExt as _,
 };
 
@@ -35,7 +35,7 @@ pub const INCR_CHUNK_SIZE: usize = 64 * 1024;
 pub struct XWmSelection {
     pub atom: Atom,
 
-    pub conn: Arc<RustConnection>,
+    pub conn: Arc<XwmConnection>,
     pub atoms: Atoms,
     pub window: OwnedX11Window,
     pub owner: X11Window,
@@ -103,7 +103,7 @@ impl Drop for IncomingTransfer {
 }
 
 pub struct OutgoingTransfer {
-    pub conn: Arc<RustConnection>,
+    pub conn: Arc<XwmConnection>,
     pub token: Option<RegistrationToken>,
 
     pub incr: bool,
@@ -176,7 +176,7 @@ impl Drop for OutgoingTransfer {
 
 impl XWmSelection {
     pub fn new(
-        conn: &Arc<RustConnection>,
+        conn: &Arc<XwmConnection>,
         screen: &Screen,
         atoms: &Atoms,
         atom: Atom,
@@ -264,7 +264,7 @@ pub enum OutgoingAction {
 }
 
 pub fn read_selection_callback(
-    conn: &RustConnection,
+    conn: &XwmConnection,
     atoms: &Atoms,
     fd: BorrowedFd<'_>,
     transfer: &mut OutgoingTransfer,
@@ -347,7 +347,7 @@ pub enum IncomingAction {
 
 pub fn write_selection_callback(
     fd: BorrowedFd<'_>,
-    conn: &RustConnection,
+    conn: &XwmConnection,
     atoms: &Atoms,
     transfer: &mut IncomingTransfer,
 ) -> Result<IncomingAction, ReplyOrIdError> {
@@ -376,7 +376,7 @@ pub fn write_selection_callback(
 }
 
 pub fn send_selection_notify_resp(
-    conn: &RustConnection,
+    conn: &XwmConnection,
     req: &SelectionRequestEvent,
     success: bool,
 ) -> Result<(), ReplyOrIdError> {

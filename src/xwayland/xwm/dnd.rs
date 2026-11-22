@@ -17,6 +17,7 @@ use smallvec::SmallVec;
 use tracing::{debug, trace, warn};
 #[cfg(feature = "wayland_frontend")]
 use wayland_server::DisplayHandle;
+use super::XwmConnection;
 use x11rb::{
     CURRENT_TIME,
     connection::Connection as _,
@@ -28,7 +29,6 @@ use x11rb::{
             CreateWindowAux, EventMask, PropMode, Screen, StackMode, Window as X11Window, WindowClass,
         },
     },
-    rust_connection::RustConnection,
     wrapper::ConnectionExt as _,
 };
 
@@ -60,7 +60,7 @@ pub struct XWmDnd {
 }
 
 impl XWmDnd {
-    pub fn new(conn: &Arc<RustConnection>, screen: &Screen, atoms: &Atoms) -> Result<Self, ReplyOrIdError> {
+    pub fn new(conn: &Arc<XwmConnection>, screen: &Screen, atoms: &Atoms) -> Result<Self, ReplyOrIdError> {
         let selection = XWmSelection::new(conn, screen, atoms, atoms.XdndSelection)?;
 
         conn.change_property32(
@@ -721,7 +721,7 @@ pub struct XwmActiveDrag {
 #[derive(Debug)]
 pub struct XwmDndSource {
     xwm: XwmId,
-    conn: Weak<RustConnection>,
+    conn: Weak<XwmConnection>,
     atoms: Atoms,
 
     target: OwnedX11Window,
