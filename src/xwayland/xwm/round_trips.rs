@@ -6,11 +6,13 @@
 //! holds a server grab, the server is short of memory) makes the
 //! compositor wait. A window manager started with
 //! [`X11Wm::start_wm_with_round_trip_limit`](super::X11Wm::start_wm_with_round_trip_limit)
-//! gives its server `limit` per call: a call that has not returned by then
-//! shuts the connection down. The call (and every later one) fails at once,
-//! the event thread ends, and the handler hears
-//! [`XwmHandler::disconnected`](super::XwmHandler::disconnected): the slow
-//! server costs its own clients, not the compositor's frames.
+//! gives its server `limit` of the compositor's time per second: once the
+//! calls of one second have waited that long together (one slow call, or
+//! many quick ones in a row: a flood answered by a busy server), the
+//! connection is shut down, even in the middle of a call. That call (and
+//! every later one) fails at once, the event thread ends, and the handler
+//! hears [`XwmHandler::disconnected`](super::XwmHandler::disconnected): the
+//! slow server costs its own clients, not the compositor's frames.
 //!
 //! Only calls that can block are timed: sending (the server may not read),
 //! flushing, waiting for a reply or an error, the extension and request
@@ -234,8 +236,15 @@ struct Watch {
     wake: Condvar,
 }
 
+/// What the calls' waiting is counted over.
+const WINDOW: Duration = Duration::from_secs(1);
+
 #[derive(Default)]
 struct State {
+    /// When the current second of counting began, and what the calls of it
+    /// waited so far (finished stretches only).
+    window: Option<Instant>,
+    spent: Duration,
     /// Calls running now (the compositor's thread, and an event source's
     /// drop on another).
     running: u32,
@@ -266,8 +275,13 @@ impl Watch {
             let mut state = self.state.lock().unwrap();
             state.running += 1;
             if state.running == 1 {
+                let now = Instant::now();
+                if state.window.is_none_or(|window| now.duration_since(window) >= WINDOW) {
+                    state.window = Some(now);
+                    state.spent = Duration::ZERO;
+                }
                 state.stretch += 1;
-                state.since = Some((Instant::now(), state.stretch));
+                state.since = Some((now, state.stretch));
                 self.wake.notify_one();
             }
         }
@@ -275,7 +289,15 @@ impl Watch {
         let mut state = self.state.lock().unwrap();
         state.running -= 1;
         if state.running == 0 {
-            state.since = None;
+            if let Some((began, _)) = state.since.take() {
+                state.spent += began.elapsed();
+            }
+            // Quick calls that add up to the limit: cut here.
+            if state.spent >= self.limit && !state.timed_out {
+                state.timed_out = true;
+                drop(state);
+                self.cut();
+            }
         }
         result
     }
@@ -289,6 +311,14 @@ impl Watch {
         self.wake.notify_one();
     }
 
+    fn cut(&self) {
+        tracing::warn!(limit = ?self.limit, "X server did not answer in time: shutting its window manager's connection down");
+        // Every poll on the socket returns now, every read ends: the
+        // waiting call fails, so does the event thread.
+        let _ = self.socket.shutdown(std::net::Shutdown::Both);
+        self.wake.notify_one();
+    }
+
     fn run(&self) {
         let mut state = self.state.lock().unwrap();
         loop {
@@ -299,7 +329,8 @@ impl Watch {
                 state = self.wake.wait(state).unwrap();
                 continue;
             };
-            let deadline = began + self.limit;
+            // What this second has left, from the start of this stretch.
+            let deadline = began + self.limit.saturating_sub(state.spent);
             let now = Instant::now();
             if now < deadline {
                 state = self.wake.wait_timeout(state, deadline - now).unwrap().0;
@@ -308,10 +339,7 @@ impl Watch {
             if state.since.is_some_and(|(_, current)| current == stretch) {
                 state.timed_out = true;
                 drop(state);
-                tracing::warn!(limit = ?self.limit, "X server did not answer in time: shutting its window manager's connection down");
-                // Every poll on the socket returns now, every read ends:
-                // the waiting call fails, so does the event thread.
-                let _ = self.socket.shutdown(std::net::Shutdown::Both);
+                self.cut();
                 return;
             }
         }
@@ -337,12 +365,42 @@ mod tests {
     }
 
     #[test]
-    fn quick_calls_in_a_row_are_never_cut() {
+    fn quick_calls_with_time_between_are_never_cut() {
         let (ours, _theirs) = UnixStream::pair().unwrap();
         let watch = Watch::start(ours, Duration::from_millis(50)).unwrap();
         let start = Instant::now();
-        while start.elapsed() < Duration::from_millis(300) {
+        while start.elapsed() < Duration::from_millis(1500) {
+            watch.timed(|| std::thread::sleep(Duration::from_millis(1)));
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        assert!(!watch.timed_out());
+        watch.close();
+    }
+
+    /// A flood a busy server answers call by call: each call is quick, but
+    /// together they hold the compositor's thread.
+    #[test]
+    fn quick_calls_that_add_up_to_the_limit_are_cut() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let watch = Watch::start(ours, Duration::from_millis(50)).unwrap();
+        let start = Instant::now();
+        while !watch.timed_out() {
+            assert!(start.elapsed() < Duration::from_millis(200), "never cut");
             watch.timed(|| std::thread::sleep(Duration::from_millis(5)));
+        }
+        assert!(start.elapsed() < Duration::from_millis(80), "cut after {:?}", start.elapsed());
+        let mut buf = [0u8; 1];
+        assert_eq!(theirs.read(&mut buf).unwrap(), 0);
+    }
+
+    /// The count starts again every second.
+    #[test]
+    fn the_waiting_is_counted_per_second() {
+        let (ours, _theirs) = UnixStream::pair().unwrap();
+        let watch = Watch::start(ours, Duration::from_millis(50)).unwrap();
+        for _ in 0..3 {
+            watch.timed(|| std::thread::sleep(Duration::from_millis(30)));
+            std::thread::sleep(WINDOW);
         }
         assert!(!watch.timed_out());
         watch.close();

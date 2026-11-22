@@ -869,13 +869,14 @@ impl X11Wm {
         Self::start_wm_inner(handle, dh, connection, client, None)
     }
 
-    /// [`start_wm`](Self::start_wm), with a time limit on every call to
-    /// the X server that waits for it (a reply, a flush, a send the server
-    /// does not read): a call that has not returned after `limit` shuts the
-    /// connection down, the call fails, and the handler hears
-    /// [`XwmHandler::disconnected`] for this window manager. For an X
-    /// server whose clients the compositor does not trust to keep it
-    /// responsive: the compositor's thread waits for it `limit` at most,
+    /// [`start_wm`](Self::start_wm), with a time limit on the calls to the
+    /// X server that wait for it (a reply, a flush, a send the server does
+    /// not read): once the calls of one second have waited `limit`
+    /// together (one slow call or many quick ones), the connection is shut
+    /// down, the call fails, the events still queued are dropped, and the
+    /// handler hears [`XwmHandler::disconnected`] for this window manager.
+    /// For an X server whose clients the compositor does not trust to keep
+    /// it responsive: the compositor's thread waits for it `limit` at most,
     /// once.
     pub fn start_wm_with_round_trip_limit<D>(
         handle: LoopHandle<'static, D>,
@@ -1085,6 +1086,9 @@ impl X11Wm {
         debug!(window = win, "Created WM Window");
 
         let conn = Arc::new(conn);
+        // Once the connection is cut for answering too slowly, the events
+        // still queued are dropped: handling them would only fail, each.
+        let cut = Arc::downgrade(&conn);
         let xsettings = XSettings::new(&conn, screen.root_depth, screen.root, &atoms)?;
         conn.flush()?;
 
@@ -1153,6 +1157,9 @@ impl X11Wm {
         let dh = dh.clone();
         handle.insert_source(source, move |event, _, data| match event {
             calloop::channel::Event::Msg(event) => {
+                if cut.upgrade().is_some_and(|conn| conn.timed_out()) {
+                    return;
+                }
                 if let Some(event_handle) = event_handle.upgrade() {
                     if let Err(err) = handle_event(&event_handle, &dh, data, id, event) {
                         warn!(id = id.0, err = ?err, "Failed to handle X11 event");
