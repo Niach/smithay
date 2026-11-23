@@ -25,7 +25,24 @@ use calloop::{
 
 use crate::backend::session::{AsErrno, Event as SessionEvent, Session};
 
-use tracing::{debug, info_span, instrument};
+use tracing::{debug, error, info_span, instrument, warn};
+
+/// The `errno` a failed libseat call left, as an [`Errno`].
+///
+/// libseat returns -1 on some paths without setting `errno` (its logind
+/// backend's `fstat` failure, older releases' failed `ReleaseDevice`), and its
+/// log handler runs in between, so the value read afterwards can be 0 or
+/// anything else. [`Errno::from_raw_os_error`] asserts Linux's range
+/// (1..=4095) and panics outside it; libinput's `close_restricted` callback is
+/// `extern "C"`, so that panic aborted the process. Outside the range this is
+/// `EIO`.
+fn errno_of(raw: i32) -> Errno {
+    if (1..4096).contains(&raw) {
+        Errno::from_raw_os_error(raw)
+    } else {
+        Errno::IO
+    }
+}
 
 #[derive(Debug)]
 struct LibSeatSessionImpl {
@@ -83,7 +100,9 @@ impl LibSeatSession {
 
             // In some cases enable_seat event is available right after startup
             // so, we can dispatch it
-            seat.dispatch(0).unwrap();
+            if let Err(err) = seat.dispatch(0) {
+                warn!("the seat's first dispatch failed: {}", errno_of(err.into()));
+            }
             let active = matches!(rx.try_recv(), Ok(SeatEvent::Enable));
 
             let internal = Rc::new(LibSeatSessionImpl {
@@ -107,7 +126,7 @@ impl LibSeatSession {
 
             (session, notifier)
         })
-        .map_err(|err| Error::FailedToOpenSession(Errno::from_raw_os_error(err.into())))
+        .map_err(|err| Error::FailedToOpenSession(errno_of(err.into())))
     }
 }
 
@@ -131,7 +150,7 @@ impl Session for LibSeatSession {
                     // SAFETY: `libseat::Device` does not close fd on drop
                     unsafe { OwnedFd::from_raw_fd(raw_fd) }
                 })
-                .map_err(|err| Error::FailedToOpenDevice(Errno::from_raw_os_error(err.into())))
+                .map_err(|err| Error::FailedToOpenDevice(errno_of(err.into())))
         } else {
             Err(Error::SessionLost)
         }
@@ -147,7 +166,7 @@ impl Session for LibSeatSession {
                     .seat
                     .borrow_mut()
                     .close_device(dev)
-                    .map_err(|err| Error::FailedToCloseDevice(Errno::from_raw_os_error(err.into())))
+                    .map_err(|err| Error::FailedToCloseDevice(errno_of(err.into())))
             } else {
                 Ok(())
             }
@@ -165,7 +184,7 @@ impl Session for LibSeatSession {
                 .seat
                 .borrow_mut()
                 .switch_session(vt)
-                .map_err(|err| Error::FailedToChangeVt(Errno::from_raw_os_error(err.into())))
+                .map_err(|err| Error::FailedToChangeVt(errno_of(err.into())))
         } else {
             Err(Error::SessionLost)
         }
@@ -212,7 +231,12 @@ impl EventSource for LibSeatSessionNotifier {
         F: FnMut(SessionEvent, &mut ()),
     {
         if Some(token) == self.token {
-            self.internal.seat.borrow_mut().dispatch(0).unwrap();
+            // A seat whose connection failed is lost: an error the loop's
+            // owner sees, never a panic.
+            if let Err(err) = self.internal.seat.borrow_mut().dispatch(0) {
+                error!("the seat's dispatch failed: {}", errno_of(err.into()));
+                return Err(Error::SessionLost);
+            }
         }
 
         let internal = &self.internal;
@@ -225,7 +249,9 @@ impl EventSource for LibSeatSessionNotifier {
                     }
                     SeatEvent::Disable => {
                         internal.active.store(false, Ordering::SeqCst);
-                        internal.seat.borrow_mut().disable().unwrap();
+                        if let Err(err) = internal.seat.borrow_mut().disable() {
+                            warn!("the seat's disable was not acknowledged: {}", errno_of(err.into()));
+                        }
                         callback(SessionEvent::PauseSession, &mut ());
                     }
                 },
@@ -307,5 +333,20 @@ impl AsErrno for Error {
             | &Self::FailedToChangeVt(errno) => Some(errno.raw_os_error()),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_errno_outside_linuxs_range_is_eio_not_a_panic() {
+        assert_eq!(errno_of(0), Errno::IO);
+        assert_eq!(errno_of(-1), Errno::IO);
+        assert_eq!(errno_of(4096), Errno::IO);
+        assert_eq!(errno_of(i32::MIN), Errno::IO);
+        assert_eq!(errno_of(libc::EBADF), Errno::BADF);
+        assert_eq!(errno_of(4095).raw_os_error(), 4095);
     }
 }
