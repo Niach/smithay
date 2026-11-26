@@ -1483,7 +1483,12 @@ impl X11Surface {
             })
     }
 
-    fn change_net_state(&self, added: &[Atom], removed: &[Atom]) -> Result<(), ConnectionError> {
+    /// Whether `_NET_WM_STATE` holds `atom`.
+    pub(super) fn has_net_state(&self, atom: Atom) -> bool {
+        self.state.lock().unwrap().net_state.contains(&atom)
+    }
+
+    pub(super) fn change_net_state(&self, added: &[Atom], removed: &[Atom]) -> Result<(), ConnectionError> {
         let mut state = self.state.lock().unwrap();
 
         let mut changed = false;

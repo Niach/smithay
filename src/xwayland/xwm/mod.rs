@@ -510,6 +510,11 @@ pub trait XwmHandler {
     ///
     /// The window will be holding a grab on the mouse button provided.
     fn move_request(&mut self, xwm: XwmId, window: X11Surface, button: u32);
+    /// Window cancels a move or resize it asked for
+    /// (`_NET_WM_MOVERESIZE_CANCEL`): the grab ends where the window is.
+    fn move_resize_cancel_request(&mut self, xwm: XwmId, window: X11Surface) {
+        let _ = (xwm, window);
+    }
 
     /// Window requests to be set as active window.
     ///
@@ -2650,32 +2655,47 @@ where
                     );
                     if let Some(surface) = xwm.windows.iter().find(|x| x.window_id() == msg.window).cloned() {
                         drop(_guard);
+                        let (horz, vert) = (xwm.atoms._NET_WM_STATE_MAXIMIZED_HORZ, xwm.atoms._NET_WM_STATE_MAXIMIZED_VERT);
                         match &data[1..=2] {
-                            &[x, y]
-                                if (x == xwm.atoms._NET_WM_STATE_MAXIMIZED_HORZ
-                                    && y == xwm.atoms._NET_WM_STATE_MAXIMIZED_VERT)
-                                    || (x == xwm.atoms._NET_WM_STATE_MAXIMIZED_VERT
-                                        && y == xwm.atoms._NET_WM_STATE_MAXIMIZED_HORZ) =>
-                            {
-                                match data[0] {
-                                    0 => {
-                                        if surface.is_maximized() {
-                                            state.unmaximize_request(xwm_id, surface)
-                                        }
+                            // One or both maximized atoms, as one message or
+                            // two (EWMH lets a client name either). The
+                            // window manager has no half-maximized state: both
+                            // = maximize, either one dropped from a maximized
+                            // window = unmaximize; a lone atom on a floating
+                            // window is kept in `_NET_WM_STATE` only, so the
+                            // second half of a two-message request completes
+                            // the pair.
+                            actions if actions.contains(&horz) || actions.contains(&vert) => {
+                                let had = (surface.has_net_state(horz), surface.has_net_state(vert));
+                                let apply = |on: bool, named: bool| match (named, data[0]) {
+                                    (false, _) => on,
+                                    (true, 0) => false,
+                                    (true, 1) => true,
+                                    (true, 2) => !on,
+                                    _ => on,
+                                };
+                                let want = (apply(had.0, actions.contains(&horz)), apply(had.1, actions.contains(&vert)));
+                                let maximized = surface.is_maximized();
+                                if want == (true, true) {
+                                    if !maximized {
+                                        state.maximize_request(xwm_id, surface.clone());
                                     }
-                                    1 => {
-                                        if !surface.is_maximized() {
-                                            state.maximize_request(xwm_id, surface)
-                                        }
+                                } else {
+                                    if maximized {
+                                        state.unmaximize_request(xwm_id, surface.clone());
                                     }
-                                    2 => {
-                                        if surface.is_maximized() {
-                                            state.unmaximize_request(xwm_id, surface)
-                                        } else {
-                                            state.maximize_request(xwm_id, surface)
+                                    if !surface.is_maximized() {
+                                        let mut added = Vec::new();
+                                        let mut removed = Vec::new();
+                                        for (atom, on) in [(horz, want.0), (vert, want.1)] {
+                                            if on {
+                                                added.push(atom);
+                                            } else {
+                                                removed.push(atom);
+                                            }
                                         }
+                                        let _ = surface.change_net_state(&added, &removed);
                                     }
-                                    _ => {}
                                 }
                             }
                             actions if actions.contains(&xwm.atoms._NET_WM_STATE_FULLSCREEN) => {
@@ -2790,6 +2810,8 @@ where
                                 state.resize_request(xwm_id, surface, data[3], resize_edge);
                             }
                             8 => state.move_request(xwm_id, surface, data[3]),
+                            // _NET_WM_MOVERESIZE_CANCEL
+                            11 => state.move_resize_cancel_request(xwm_id, surface),
                             _ => {} // ignore keyboard moves/resizes for now
                         }
                     }
